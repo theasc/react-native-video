@@ -13,8 +13,6 @@ static NSString *const readyForDisplayKeyPath = @"readyForDisplay";
 static NSString *const playbackRate = @"rate";
 static NSString *const timedMetadata = @"timedMetadata";
 
-static int const RCTVideoUnset = -1;
-
 @implementation RCTVideo
 {
   AVPlayer *_player;
@@ -49,7 +47,6 @@ static int const RCTVideoUnset = -1;
   BOOL _allowsExternalPlayback;
   NSArray * _textTracks;
   NSDictionary * _selectedTextTrack;
-  NSDictionary * _selectedAudioTrack;
   BOOL _playbackStalled;
   BOOL _playInBackground;
   BOOL _playWhenInactive;
@@ -104,12 +101,12 @@ static int const RCTVideoUnset = -1;
   return self;
 }
 
-- (AVPlayerViewController*)createPlayerViewController:(AVPlayer*)player withPlayerItem:(AVPlayerItem*)playerItem {
+- (AVPlayerViewController*)createPlayerViewControllerWithPlayerItem:(AVPlayerItem*)playerItem {
     RCTVideoPlayerViewController* playerLayer= [[RCTVideoPlayerViewController alloc] init];
     playerLayer.showsPlaybackControls = YES;
     playerLayer.rctDelegate = self;
     playerLayer.view.frame = self.bounds;
-    playerLayer.player = player;
+    playerLayer.player = [[AVPlayer alloc] initWithURL:[self urlOfCurrentlyPlayingInPlayer:_player]];
     playerLayer.view.frame = self.bounds;
     return playerLayer;
 }
@@ -308,26 +305,26 @@ static int const RCTVideoUnset = -1;
   [self removePlayerItemObservers];
   
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-
+    
     // perform on next run loop, otherwise other passed react-props may not be set
     _playerItem = [self playerItemForSource:source];
     [self addPlayerItemObservers];
-
+    
     [_player pause];
     [_playerViewController.view removeFromSuperview];
     _playerViewController = nil;
-
+    
     if (_playbackRateObserverRegistered) {
       [_player removeObserver:self forKeyPath:playbackRate context:nil];
       _playbackRateObserverRegistered = NO;
     }
-
+    
     _player = [AVPlayer playerWithPlayerItem:_playerItem];
     _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-
+    
     [_player addObserver:self forKeyPath:playbackRate options:0 context:nil];
     _playbackRateObserverRegistered = YES;
-
+    
     [self addPlayerTimeObserver];
 
     //Perform on next run loop, otherwise onVideoLoadStart is nil
@@ -347,12 +344,8 @@ static int const RCTVideoUnset = -1;
 }
 
 - (NSURL*) urlFilePath:(NSString*) filepath {
-  if ([filepath containsString:@"file://"]) {
-    return [NSURL URLWithString:filepath];
-  }
-  
-  // code to support local caching
   NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+  
   NSString* relativeFilePath = [filepath lastPathComponent];
   // the file may be multiple levels below the documents directory
   NSArray* fileComponents = [filepath componentsSeparatedByString:@"Documents/"];
@@ -388,7 +381,7 @@ static int const RCTVideoUnset = -1;
     NSArray *cookies = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookies];
     [assetOptions setObject:cookies forKey:AVURLAssetHTTPCookiesKey];
     asset = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:uri] options:assetOptions];
-  } else if (isAsset) { //  assets on iOS can be in the Bundle or Documents folder
+  } else if (isAsset) { //  assets on iOS have to be in the Documents folder
     asset = [AVURLAsset URLAssetWithURL:[self urlFilePath:uri] options:nil];
   } else { // file passed in through JS, or an asset in the Xcode project
     asset = [AVURLAsset URLAssetWithURL:[[NSURL alloc] initFileURLWithPath:[[NSBundle mainBundle] pathForResource:uri ofType:type]] options:nil];
@@ -415,7 +408,6 @@ static int const RCTVideoUnset = -1;
                            atTime:kCMTimeZero
                             error:nil];
 
-  NSMutableArray* validTextTracks = [NSMutableArray array];
   for (int i = 0; i < _textTracks.count; ++i) {
     AVURLAsset *textURLAsset;
     NSString *textUri = [_textTracks objectAtIndex:i][@"uri"];
@@ -425,8 +417,6 @@ static int const RCTVideoUnset = -1;
       textURLAsset = [AVURLAsset URLAssetWithURL:[self urlFilePath:textUri] options:nil];
     }
     AVAssetTrack *textTrackAsset = [textURLAsset tracksWithMediaType:AVMediaTypeText].firstObject;
-    if (!textTrackAsset) continue; // fix when there's no textTrackAsset
-    [validTextTracks addObject:[_textTracks objectAtIndex:i]];
     AVMutableCompositionTrack *textCompTrack = [mixComposition
                                                 addMutableTrackWithMediaType:AVMediaTypeText
                                                 preferredTrackID:kCMPersistentTrackID_Invalid];
@@ -434,9 +424,6 @@ static int const RCTVideoUnset = -1;
                                ofTrack:textTrackAsset
                                 atTime:kCMTimeZero
                                  error:nil];
-  }
-  if (validTextTracks.count != _textTracks.count) {
-    [self setTextTracks:validTextTracks];
   }
 
   return [AVPlayerItem playerItemWithAsset:mixComposition];
@@ -511,7 +498,6 @@ static int const RCTVideoUnset = -1;
                                  @"height": height,
                                  @"orientation": orientation
                                  },
-                             @"audioTracks": [self getAudioTrackInfo],
                              @"textTracks": [self getTextTrackInfo],
                              @"target": self.reactTag});
         }
@@ -743,7 +729,6 @@ static int const RCTVideoUnset = -1;
     [_player setMuted:NO];
   }
 
-  [self setSelectedAudioTrack:_selectedAudioTrack];
   [self setSelectedTextTrack:_selectedTextTrack];
   [self setResizeMode:_resizeMode];
   [self setRepeat:_repeat];
@@ -756,70 +741,18 @@ static int const RCTVideoUnset = -1;
   _repeat = repeat;
 }
 
-- (void)setMediaSelectionTrackForCharacteristic:(AVMediaCharacteristic)characteristic
-                                   withCriteria:(NSDictionary *)criteria
-{
-    NSString *type = criteria[@"type"];
-    AVMediaSelectionGroup *group = [_player.currentItem.asset
-                                    mediaSelectionGroupForMediaCharacteristic:characteristic];
-    AVMediaSelectionOption *mediaOption;
-    
-    if ([type isEqualToString:@"disabled"]) {
-        // Do nothing. We want to ensure option is nil
-    } else if ([type isEqualToString:@"language"] || [type isEqualToString:@"title"]) {
-        NSString *value = criteria[@"value"];
-        for (int i = 0; i < group.options.count; ++i) {
-            AVMediaSelectionOption *currentOption = [group.options objectAtIndex:i];
-            NSString *optionValue;
-            if ([type isEqualToString:@"language"]) {
-                optionValue = [currentOption extendedLanguageTag];
-            } else {
-                optionValue = [[[currentOption commonMetadata]
-                                valueForKey:@"value"]
-                               objectAtIndex:0];
-            }
-            if ([value isEqualToString:optionValue]) {
-                mediaOption = currentOption;
-                break;
-            }
-        }
-        //} else if ([type isEqualToString:@"default"]) {
-        //  option = group.defaultOption; */
-    } else if ([type isEqualToString:@"index"]) {
-        if ([criteria[@"value"] isKindOfClass:[NSNumber class]]) {
-            int index = [criteria[@"value"] intValue];
-            if (group.options.count > index) {
-                mediaOption = [group.options objectAtIndex:index];
-            }
-        }
-    } else { // default. invalid type or "system"
-        [_player.currentItem selectMediaOptionAutomaticallyInMediaSelectionGroup:group];
-        return;
-    }
-    
-    // If a match isn't found, option will be nil and text tracks will be disabled
-    [_player.currentItem selectMediaOption:mediaOption inMediaSelectionGroup:group];
-}
-
-- (void)setSelectedAudioTrack:(NSDictionary *)selectedAudioTrack {
-    _selectedAudioTrack = selectedAudioTrack;
-    [self setMediaSelectionTrackForCharacteristic:AVMediaCharacteristicAudible
-                                        withCriteria:_selectedAudioTrack];
-}
-
 - (void)setSelectedTextTrack:(NSDictionary *)selectedTextTrack {
   _selectedTextTrack = selectedTextTrack;
-  if (_textTracks) { // sideloaded text tracks
+  if (_textTracks) {
     [self setSideloadedText];
-  } else { // text tracks included in the HLS playlist
-    [self setMediaSelectionTrackForCharacteristic:AVMediaCharacteristicLegible
-                                     withCriteria:_selectedTextTrack];
+  } else {
+    [self setStreamingText];
   }
 }
 
 - (void) setSideloadedText {
   NSString *type = _selectedTextTrack[@"type"];
-  NSArray *textTracks = [self getTextTrackInfo];
+  NSArray* textTracks = [self getTextTrackInfo];
   
   // The first few tracks will be audio & video track
   int firstTextIndex = 0;
@@ -829,7 +762,7 @@ static int const RCTVideoUnset = -1;
     }
   }
   
-  int selectedTrackIndex = RCTVideoUnset;
+  int selectedTrackIndex = -1;
   
   if ([type isEqualToString:@"disabled"]) {
     // Do nothing. We want to ensure option is nil
@@ -860,28 +793,27 @@ static int const RCTVideoUnset = -1;
     }
   }
   
-  // in the situation that a selected text track is not available (eg. specifies a textTrack not available)
-  if (![type isEqualToString:@"disabled"] && selectedTrackIndex == RCTVideoUnset) {
-    CFArrayRef captioningMediaCharacteristics = MACaptionAppearanceCopyPreferredCaptioningMediaCharacteristics(kMACaptionAppearanceDomainUser);
-    NSArray *captionSettings = (__bridge NSArray*)captioningMediaCharacteristics;
-    if ([captionSettings containsObject:AVMediaCharacteristicTranscribesSpokenDialogForAccessibility]) {
-      selectedTrackIndex = 0; // If we can't find a match, use the first available track
-      NSString *systemLanguage = [[NSLocale preferredLanguages] firstObject];
-      for (int i = 0; i < textTracks.count; ++i) {
-        NSDictionary *currentTextTrack = [textTracks objectAtIndex:i];
-        if ([systemLanguage isEqualToString:currentTextTrack[@"language"]]) {
-          selectedTrackIndex = i;
-          break;
+  // user's selected language might not be available, or system defaults have captions enabled
+  if (selectedTrackIndex == -1 || [type isEqualToString:@"default"]) {
+      CFArrayRef captioningMediaCharacteristics = MACaptionAppearanceCopyPreferredCaptioningMediaCharacteristics(kMACaptionAppearanceDomainUser);
+      NSArray *captionSettings = (__bridge NSArray*)captioningMediaCharacteristics;
+      if ([captionSettings containsObject: AVMediaCharacteristicTranscribesSpokenDialogForAccessibility]) {
+        // iterate through the textTracks to find a matching option, or default to the first object.
+        selectedTrackIndex = 0;
+        
+        NSString * systemLanguage = [[NSLocale preferredLanguages] firstObject];
+        for (int i = 0; i < textTracks.count; ++i) {
+          NSDictionary *currentTextTrack = [textTracks objectAtIndex:i];
+          if ([systemLanguage isEqualToString:currentTextTrack[@"language"]]) {
+            selectedTrackIndex = i;
+            break;
+          }
         }
       }
-    }
   }
-    
+  
   for (int i = firstTextIndex; i < _player.currentItem.tracks.count; ++i) {
-    BOOL isEnabled = NO;
-    if (selectedTrackIndex != RCTVideoUnset) {
-      isEnabled = i == selectedTrackIndex + firstTextIndex;
-    }
+    BOOL isEnabled = i == selectedTrackIndex + firstTextIndex;
     [_player.currentItem.tracks[i] setEnabled:isEnabled];
   }
 }
@@ -937,31 +869,9 @@ static int const RCTVideoUnset = -1;
   if (_selectedTextTrack) [self setSelectedTextTrack:_selectedTextTrack];
 }
 
-- (NSArray *)getAudioTrackInfo
-{
-    NSMutableArray *audioTracks = [[NSMutableArray alloc] init];
-    AVMediaSelectionGroup *group = [_player.currentItem.asset
-                                    mediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicAudible];
-    for (int i = 0; i < group.options.count; ++i) {
-        AVMediaSelectionOption *currentOption = [group.options objectAtIndex:i];
-        NSString *title = @"";
-        NSArray *values = [[currentOption commonMetadata] valueForKey:@"value"];
-        if (values.count > 0) {
-            title = [values objectAtIndex:0];
-        }
-        NSString *language = [currentOption extendedLanguageTag] ? [currentOption extendedLanguageTag] : @"";
-        NSDictionary *audioTrack = @{
-                                    @"index": [NSNumber numberWithInt:i],
-                                    @"title": title,
-                                    @"language": language
-                                    };
-        [audioTracks addObject:audioTrack];
-    }
-    return audioTracks;
-}
-
 - (NSArray *)getTextTrackInfo
 {
+  
   // if sideloaded, textTracks will already be set
   if (_textTracks) return _textTracks;
   
@@ -1043,12 +953,20 @@ static int const RCTVideoUnset = -1;
 {
     if( _player )
     {
-        _playerViewController = [self createPlayerViewController:_player withPlayerItem:_playerItem];
-        // to prevent video from being animated when resizeMode is 'cover'
-        // resize mode must be set before subview is added
+        _playerViewController = [self createPlayerViewControllerWithPlayerItem:_playerItem];
         [self setResizeMode:_resizeMode];
         [self addSubview:_playerViewController.view];
+        [_playerViewController.player play];
     }
+}
+
+-(NSURL *)urlOfCurrentlyPlayingInPlayer:(AVPlayer *)player{
+    // get current asset
+    AVAsset *currentPlayerAsset = player.currentItem.asset;
+    // make sure the current asset is an AVURLAsset
+    if (![currentPlayerAsset isKindOfClass:AVURLAsset.class]) return nil;
+    // return the NSURL
+    return [(AVURLAsset *)currentPlayerAsset URL];
 }
 
 - (void)usePlayerLayer
