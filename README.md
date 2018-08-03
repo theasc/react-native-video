@@ -227,6 +227,7 @@ var styles = StyleSheet.create({
 * [textTracks](#texttracks)
 * [useTextureView](#usetextureview)
 * [volume](#volume)
+* [bufferConfig](#bufferconfig)
 
 ### Event props
 * [onAudioBecomingNoisy](#onaudiobecomingnoisy)
@@ -476,6 +477,38 @@ Adjust the volume.
 * **Other values** - Reduce volume
 
 Platforms: all
+
+#### bufferConfig
+Adjust the video load control parameters: minBufferMs, maxBufferMs, bufferForPlaybackMs and playbackAfterRebufferMs.
+Note: these values can not be changed after the video component is loaded.
+
+Property | Description
+--- | ---
+minBufferMs | The default minimum duration of media that the player will attempt to ensure is buffered at all times, in milliseconds.
+maxBufferMs | The default maximum duration of media that the player will attempt to buffer, in milliseconds.
+bufferForPlaybackMs | The default duration of media that must be buffered for playback to start or resume following a user action such as a seek, in milliseconds.
+playbackAfterRebufferMs | The default duration of media that must be buffered for playback to resume after a rebuffer, in milliseconds. A rebuffer is defined to be caused by buffer depletion rather than a user action.
+
+```
+bufferConfig={{
+  minBufferMs: number,
+  maxBufferMs: number,
+  bufferForPlaybackMs: number,
+  bufferForPlaybackAfterRebufferMs: number,
+}}
+```
+
+Example with default values:
+```
+bufferConfig={{
+  minBufferMs: 15000,
+  maxBufferMs: 50000,
+  bufferForPlaybackMs: 2500,
+  bufferForPlaybackAfterRebufferMs: 5000,
+}}
+```
+
+Platforms: AndroidExoplayer
 
 ### Event props
 
